@@ -1,0 +1,24 @@
+{
+  "name": "mcp-fakturownia",
+  "version": "1.0.0",
+  "description": "MCP server for Fakturownia.pl invoicing API",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "mcp-fakturownia": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc --watch"
+  },
+  "keywords": ["mcp", "fakturownia", "invoicing", "poland"],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.8.0"
+  }
+}

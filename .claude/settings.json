@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "fakturownia": {
+      "command": "node",
+      "args": ["/Users/rpa/_github/mcp-fakturownia-rpa/dist/index.js"],
+      "env": {
+        "FAKTUROWNIA_API_TOKEN": "q4NDZ_qcmz3gw2xn1Sgo",
+        "FAKTUROWNIA_DOMAIN": "prohern"
+      }
+    }
+  }
+}
