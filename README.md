@@ -106,8 +106,26 @@ Dodaj do `.claude/settings.json`:
 - `update_warehouse_document` - Aktualizacja dokumentu
 - `delete_warehouse_document` - Usuniecie dokumentu
 
-### Pozostale
-- `list_categories` / `create_category` - Kategorie
-- `list_warehouses` / `create_warehouse` - Magazyny
-- `list_departments` / `create_department` - Dzialy firmy
+### Kategorie
+- `list_categories` - Lista kategorii
+- `get_category` - Pobranie kategorii po ID
+- `create_category` - Utworzenie kategorii
+- `update_category` - Aktualizacja kategorii
+- `delete_category` - Usuniecie kategorii
+
+### Magazyny
+- `list_warehouses` - Lista magazynow
+- `get_warehouse` - Pobranie magazynu po ID
+- `create_warehouse` - Utworzenie magazynu
+- `update_warehouse` - Aktualizacja magazynu
+- `delete_warehouse` - Usuniecie magazynu
+
+### Dzialy firmy
+- `list_departments` - Lista dzialow
+- `get_department` - Pobranie dzialu po ID
+- `create_department` - Utworzenie dzialu
+- `update_department` - Aktualizacja dzialu
+- `delete_department` - Usuniecie dzialu
+
+### Konto
 - `get_account_info` - Informacje o koncie

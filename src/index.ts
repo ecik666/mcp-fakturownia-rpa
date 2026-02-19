@@ -19,19 +19,71 @@ if (!API_TOKEN || !DOMAIN) {
 
 const client = new FakturowniaClient({ apiToken: API_TOKEN, domain: DOMAIN });
 
-// ── Helper ───────────────────────────────────────────────────
+// ── Helpers ─────────────────────────────────────────────────
 
+/** Wrap successful response as MCP tool result. */
 function result(data: unknown) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
   };
 }
 
+/** Wrap error as MCP tool error result. */
 function errorResult(err: unknown) {
   const message = err instanceof Error ? err.message : String(err);
   return {
     content: [{ type: "text" as const, text: `Error: ${message}` }],
     isError: true,
+  };
+}
+
+/**
+ * Safely parse a JSON string and validate it is a non-null object.
+ * Throws a descriptive error on invalid input.
+ */
+function parseJsonObject(raw: string, label: string): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(
+      `Invalid JSON for "${label}": ${raw.length > 200 ? raw.slice(0, 200) + "…" : raw}`,
+    );
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(
+      `"${label}" must be a JSON object (got ${parsed === null ? "null" : Array.isArray(parsed) ? "array" : typeof parsed})`,
+    );
+  }
+  return parsed as Record<string, unknown>;
+}
+
+/**
+ * Strip undefined values from params and return a clean query params object. (#8)
+ */
+function buildQueryParams(
+  params: Record<string, string | undefined>,
+): Record<string, string> {
+  const queryParams: Record<string, string> = {};
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined) queryParams[k] = v;
+  }
+  return queryParams;
+}
+
+/**
+ * Wrap a tool handler with standard try/catch error handling. (#9)
+ */
+function handleTool<P>(
+  fn: (params: P) => Promise<unknown> | unknown,
+): (params: P) => Promise<{ content: { type: "text"; text: string }[]; isError?: boolean }> {
+  return async (params: P) => {
+    try {
+      const data = await fn(params);
+      return result(data);
+    } catch (err) {
+      return errorResult(err);
+    }
   };
 }
 
@@ -65,18 +117,7 @@ server.tool(
     include_positions: z.string().optional().describe("Include line items: true/false"),
     income: z.string().optional().describe("1 = income, 0 = expense"),
   },
-  async (params) => {
-    try {
-      const queryParams: Record<string, string> = {};
-      for (const [k, v] of Object.entries(params)) {
-        if (v !== undefined) queryParams[k] = v;
-      }
-      const data = await client.listInvoices(queryParams);
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
-  },
+  handleTool((params) => client.listInvoices(buildQueryParams(params))),
 );
 
 server.tool(
@@ -86,16 +127,11 @@ server.tool(
     id: z.number().describe("Invoice ID"),
     include_positions: z.string().optional().describe("Include line items: true/false"),
   },
-  async ({ id, include_positions }) => {
-    try {
-      const params: Record<string, string> = {};
-      if (include_positions) params.include_positions = include_positions;
-      const data = await client.getInvoice(id, params);
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
-  },
+  handleTool(({ id, include_positions }) => {
+    const params: Record<string, string> = {};
+    if (include_positions) params.include_positions = include_positions;
+    return client.getInvoice(id, params);
+  }),
 );
 
 server.tool(
@@ -112,15 +148,10 @@ server.tool(
       .optional()
       .describe("Send to KSeF after saving"),
   },
-  async ({ invoice, gov_save_and_send }) => {
-    try {
-      const invoiceData = JSON.parse(invoice);
-      const data = await client.createInvoice(invoiceData, gov_save_and_send);
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
-  },
+  handleTool(({ invoice, gov_save_and_send }) => {
+    const invoiceData = parseJsonObject(invoice, "invoice");
+    return client.createInvoice(invoiceData, gov_save_and_send);
+  }),
 );
 
 server.tool(
@@ -130,43 +161,24 @@ server.tool(
     id: z.number().describe("Invoice ID"),
     invoice: z.string().describe("JSON string of fields to update"),
   },
-  async ({ id, invoice }) => {
-    try {
-      const invoiceData = JSON.parse(invoice);
-      const data = await client.updateInvoice(id, invoiceData);
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
-  },
+  handleTool(({ id, invoice }) => {
+    const invoiceData = parseJsonObject(invoice, "invoice");
+    return client.updateInvoice(id, invoiceData);
+  }),
 );
 
 server.tool(
   "delete_invoice",
   "Delete an invoice by ID",
   { id: z.number().describe("Invoice ID") },
-  async ({ id }) => {
-    try {
-      const data = await client.deleteInvoice(id);
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
-  },
+  handleTool(({ id }) => client.deleteInvoice(id)),
 );
 
 server.tool(
   "send_invoice_email",
   "Send an invoice by email",
   { id: z.number().describe("Invoice ID") },
-  async ({ id }) => {
-    try {
-      const data = await client.sendInvoiceByEmail(id);
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
-  },
+  handleTool(({ id }) => client.sendInvoiceByEmail(id)),
 );
 
 server.tool(
@@ -178,28 +190,14 @@ server.tool(
       .string()
       .describe("New status: issued, sent, paid, partial, rejected"),
   },
-  async ({ id, status }) => {
-    try {
-      const data = await client.changeInvoiceStatus(id, status);
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
-  },
+  handleTool(({ id, status }) => client.changeInvoiceStatus(id, status)),
 );
 
 server.tool(
   "get_invoice_pdf_url",
-  "Get direct PDF download URL for an invoice",
+  "Get PDF download URL for an invoice (URL requires authentication, token is not exposed)",
   { id: z.number().describe("Invoice ID") },
-  async ({ id }) => {
-    try {
-      const url = await client.getInvoicePdfUrl(id);
-      return result({ pdf_url: url });
-    } catch (err) {
-      return errorResult(err);
-    }
-  },
+  handleTool(({ id }) => client.getInvoicePdfUrl(id)),
 );
 
 // ═══════════════════════════════════════════════════════════════
@@ -210,28 +208,14 @@ server.tool(
   "send_invoice_to_ksef",
   "Send an existing invoice to the KSeF system",
   { id: z.number().describe("Invoice ID") },
-  async ({ id }) => {
-    try {
-      const data = await client.sendInvoiceToKsef(id);
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
-  },
+  handleTool(({ id }) => client.sendInvoiceToKsef(id)),
 );
 
 server.tool(
   "get_invoice_ksef_status",
   "Get KSeF status for an invoice (gov_status, gov_id, errors, etc.)",
   { id: z.number().describe("Invoice ID") },
-  async ({ id }) => {
-    try {
-      const data = await client.getInvoiceKsefStatus(id);
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
-  },
+  handleTool(({ id }) => client.getInvoiceKsefStatus(id)),
 );
 
 // ═══════════════════════════════════════════════════════════════
@@ -250,32 +234,14 @@ server.tool(
     shortcut: z.string().optional().describe("Search by shortcut"),
     external_id: z.string().optional().describe("Search by external ID"),
   },
-  async (params) => {
-    try {
-      const queryParams: Record<string, string> = {};
-      for (const [k, v] of Object.entries(params)) {
-        if (v !== undefined) queryParams[k] = v;
-      }
-      const data = await client.listClients(queryParams);
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
-  },
+  handleTool((params) => client.listClients(buildQueryParams(params))),
 );
 
 server.tool(
   "get_client",
   "Get a single client by ID",
   { id: z.number().describe("Client ID") },
-  async ({ id }) => {
-    try {
-      const data = await client.getClient(id);
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
-  },
+  handleTool(({ id }) => client.getClient(id)),
 );
 
 server.tool(
@@ -288,15 +254,10 @@ server.tool(
         "JSON string of client object (name, tax_no, city, street, email, etc.)",
       ),
   },
-  async ({ client_data }) => {
-    try {
-      const clientObj = JSON.parse(client_data);
-      const data = await client.createClient(clientObj);
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
-  },
+  handleTool(({ client_data }) => {
+    const clientObj = parseJsonObject(client_data, "client_data");
+    return client.createClient(clientObj);
+  }),
 );
 
 server.tool(
@@ -306,29 +267,17 @@ server.tool(
     id: z.number().describe("Client ID"),
     client_data: z.string().describe("JSON string of fields to update"),
   },
-  async ({ id, client_data }) => {
-    try {
-      const clientObj = JSON.parse(client_data);
-      const data = await client.updateClient(id, clientObj);
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
-  },
+  handleTool(({ id, client_data }) => {
+    const clientObj = parseJsonObject(client_data, "client_data");
+    return client.updateClient(id, clientObj);
+  }),
 );
 
 server.tool(
   "delete_client",
   "Delete a client by ID",
   { id: z.number().describe("Client ID") },
-  async ({ id }) => {
-    try {
-      const data = await client.deleteClient(id);
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
-  },
+  handleTool(({ id }) => client.deleteClient(id)),
 );
 
 // ═══════════════════════════════════════════════════════════════
@@ -347,32 +296,14 @@ server.tool(
       .optional()
       .describe("Products changed after this date (YYYY-MM-DD)"),
   },
-  async (params) => {
-    try {
-      const queryParams: Record<string, string> = {};
-      for (const [k, v] of Object.entries(params)) {
-        if (v !== undefined) queryParams[k] = v;
-      }
-      const data = await client.listProducts(queryParams);
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
-  },
+  handleTool((params) => client.listProducts(buildQueryParams(params))),
 );
 
 server.tool(
   "get_product",
   "Get a single product by ID",
   { id: z.number().describe("Product ID") },
-  async ({ id }) => {
-    try {
-      const data = await client.getProduct(id);
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
-  },
+  handleTool(({ id }) => client.getProduct(id)),
 );
 
 server.tool(
@@ -385,15 +316,10 @@ server.tool(
         "JSON string of product object (name, code, price_net, tax, etc.)",
       ),
   },
-  async ({ product }) => {
-    try {
-      const productData = JSON.parse(product);
-      const data = await client.createProduct(productData);
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
-  },
+  handleTool(({ product }) => {
+    const productData = parseJsonObject(product, "product");
+    return client.createProduct(productData);
+  }),
 );
 
 server.tool(
@@ -403,15 +329,10 @@ server.tool(
     id: z.number().describe("Product ID"),
     product: z.string().describe("JSON string of fields to update"),
   },
-  async ({ id, product }) => {
-    try {
-      const productData = JSON.parse(product);
-      const data = await client.updateProduct(id, productData);
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
-  },
+  handleTool(({ id, product }) => {
+    const productData = parseJsonObject(product, "product");
+    return client.updateProduct(id, productData);
+  }),
 );
 
 // ═══════════════════════════════════════════════════════════════
@@ -429,32 +350,14 @@ server.tool(
       .optional()
       .describe("Set to 'invoices' to include linked invoice data"),
   },
-  async (params) => {
-    try {
-      const queryParams: Record<string, string> = {};
-      for (const [k, v] of Object.entries(params)) {
-        if (v !== undefined) queryParams[k] = v;
-      }
-      const data = await client.listPayments(queryParams);
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
-  },
+  handleTool((params) => client.listPayments(buildQueryParams(params))),
 );
 
 server.tool(
   "get_payment",
   "Get a single payment by ID",
   { id: z.number().describe("Payment ID") },
-  async ({ id }) => {
-    try {
-      const data = await client.getPayment(id);
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
-  },
+  handleTool(({ id }) => client.getPayment(id)),
 );
 
 server.tool(
@@ -467,15 +370,10 @@ server.tool(
         "JSON string of payment object (name, price, invoice_id or invoice_ids, paid, kind, etc.)",
       ),
   },
-  async ({ payment }) => {
-    try {
-      const paymentData = JSON.parse(payment);
-      const data = await client.createPayment(paymentData);
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
-  },
+  handleTool(({ payment }) => {
+    const paymentData = parseJsonObject(payment, "payment");
+    return client.createPayment(paymentData);
+  }),
 );
 
 server.tool(
@@ -485,29 +383,17 @@ server.tool(
     id: z.number().describe("Payment ID"),
     payment: z.string().describe("JSON string of fields to update"),
   },
-  async ({ id, payment }) => {
-    try {
-      const paymentData = JSON.parse(payment);
-      const data = await client.updatePayment(id, paymentData);
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
-  },
+  handleTool(({ id, payment }) => {
+    const paymentData = parseJsonObject(payment, "payment");
+    return client.updatePayment(id, paymentData);
+  }),
 );
 
 server.tool(
   "delete_payment",
   "Delete a payment by ID",
   { id: z.number().describe("Payment ID") },
-  async ({ id }) => {
-    try {
-      const data = await client.deletePayment(id);
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
-  },
+  handleTool(({ id }) => client.deletePayment(id)),
 );
 
 // ═══════════════════════════════════════════════════════════════
@@ -521,32 +407,14 @@ server.tool(
     page: z.string().optional().describe("Page number"),
     per_page: z.string().optional().describe("Items per page"),
   },
-  async (params) => {
-    try {
-      const queryParams: Record<string, string> = {};
-      for (const [k, v] of Object.entries(params)) {
-        if (v !== undefined) queryParams[k] = v;
-      }
-      const data = await client.listWarehouseDocuments(queryParams);
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
-  },
+  handleTool((params) => client.listWarehouseDocuments(buildQueryParams(params))),
 );
 
 server.tool(
   "get_warehouse_document",
   "Get a warehouse document by ID",
   { id: z.number().describe("Warehouse document ID") },
-  async ({ id }) => {
-    try {
-      const data = await client.getWarehouseDocument(id);
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
-  },
+  handleTool(({ id }) => client.getWarehouseDocument(id)),
 );
 
 server.tool(
@@ -559,15 +427,10 @@ server.tool(
         "JSON string: kind (pz/wz/mm), warehouse_id, issue_date, warehouse_actions[], etc.",
       ),
   },
-  async ({ document }) => {
-    try {
-      const docData = JSON.parse(document);
-      const data = await client.createWarehouseDocument(docData);
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
-  },
+  handleTool(({ document }) => {
+    const docData = parseJsonObject(document, "document");
+    return client.createWarehouseDocument(docData);
+  }),
 );
 
 server.tool(
@@ -577,47 +440,35 @@ server.tool(
     id: z.number().describe("Warehouse document ID"),
     document: z.string().describe("JSON string of fields to update"),
   },
-  async ({ id, document }) => {
-    try {
-      const docData = JSON.parse(document);
-      const data = await client.updateWarehouseDocument(id, docData);
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
-  },
+  handleTool(({ id, document }) => {
+    const docData = parseJsonObject(document, "document");
+    return client.updateWarehouseDocument(id, docData);
+  }),
 );
 
 server.tool(
   "delete_warehouse_document",
   "Delete a warehouse document by ID",
   { id: z.number().describe("Warehouse document ID") },
-  async ({ id }) => {
-    try {
-      const data = await client.deleteWarehouseDocument(id);
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
-  },
+  handleTool(({ id }) => client.deleteWarehouseDocument(id)),
 );
 
 // ═══════════════════════════════════════════════════════════════
-//  CATEGORIES
+//  CATEGORIES (#7 — added get, update, delete)
 // ═══════════════════════════════════════════════════════════════
 
 server.tool(
   "list_categories",
   "List all categories",
   {},
-  async () => {
-    try {
-      const data = await client.listCategories();
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
-  },
+  handleTool(() => client.listCategories()),
+);
+
+server.tool(
+  "get_category",
+  "Get a single category by ID",
+  { id: z.number().describe("Category ID") },
+  handleTool(({ id }) => client.getCategory(id)),
 );
 
 server.tool(
@@ -626,33 +477,48 @@ server.tool(
   {
     category: z.string().describe("JSON string of category object (name, etc.)"),
   },
-  async ({ category }) => {
-    try {
-      const catData = JSON.parse(category);
-      const data = await client.createCategory(catData);
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
+  handleTool(({ category }) => {
+    const catData = parseJsonObject(category, "category");
+    return client.createCategory(catData);
+  }),
+);
+
+server.tool(
+  "update_category",
+  "Update an existing category",
+  {
+    id: z.number().describe("Category ID"),
+    category: z.string().describe("JSON string of fields to update"),
   },
+  handleTool(({ id, category }) => {
+    const catData = parseJsonObject(category, "category");
+    return client.updateCategory(id, catData);
+  }),
+);
+
+server.tool(
+  "delete_category",
+  "Delete a category by ID",
+  { id: z.number().describe("Category ID") },
+  handleTool(({ id }) => client.deleteCategory(id)),
 );
 
 // ═══════════════════════════════════════════════════════════════
-//  WAREHOUSES
+//  WAREHOUSES (#7 — added get, update, delete)
 // ═══════════════════════════════════════════════════════════════
 
 server.tool(
   "list_warehouses",
   "List all warehouses",
   {},
-  async () => {
-    try {
-      const data = await client.listWarehouses();
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
-  },
+  handleTool(() => client.listWarehouses()),
+);
+
+server.tool(
+  "get_warehouse",
+  "Get a single warehouse by ID",
+  { id: z.number().describe("Warehouse ID") },
+  handleTool(({ id }) => client.getWarehouse(id)),
 );
 
 server.tool(
@@ -661,33 +527,48 @@ server.tool(
   {
     warehouse: z.string().describe("JSON string of warehouse object (name, etc.)"),
   },
-  async ({ warehouse }) => {
-    try {
-      const whData = JSON.parse(warehouse);
-      const data = await client.createWarehouse(whData);
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
+  handleTool(({ warehouse }) => {
+    const whData = parseJsonObject(warehouse, "warehouse");
+    return client.createWarehouse(whData);
+  }),
+);
+
+server.tool(
+  "update_warehouse",
+  "Update an existing warehouse",
+  {
+    id: z.number().describe("Warehouse ID"),
+    warehouse: z.string().describe("JSON string of fields to update"),
   },
+  handleTool(({ id, warehouse }) => {
+    const whData = parseJsonObject(warehouse, "warehouse");
+    return client.updateWarehouse(id, whData);
+  }),
+);
+
+server.tool(
+  "delete_warehouse",
+  "Delete a warehouse by ID",
+  { id: z.number().describe("Warehouse ID") },
+  handleTool(({ id }) => client.deleteWarehouse(id)),
 );
 
 // ═══════════════════════════════════════════════════════════════
-//  DEPARTMENTS
+//  DEPARTMENTS (#7 — added get, update, delete)
 // ═══════════════════════════════════════════════════════════════
 
 server.tool(
   "list_departments",
   "List all company departments",
   {},
-  async () => {
-    try {
-      const data = await client.listDepartments();
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
-  },
+  handleTool(() => client.listDepartments()),
+);
+
+server.tool(
+  "get_department",
+  "Get a single department by ID",
+  { id: z.number().describe("Department ID") },
+  handleTool(({ id }) => client.getDepartment(id)),
 );
 
 server.tool(
@@ -698,15 +579,30 @@ server.tool(
       .string()
       .describe("JSON string of department object (name, shortcut, etc.)"),
   },
-  async ({ department }) => {
-    try {
-      const deptData = JSON.parse(department);
-      const data = await client.createDepartment(deptData);
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
+  handleTool(({ department }) => {
+    const deptData = parseJsonObject(department, "department");
+    return client.createDepartment(deptData);
+  }),
+);
+
+server.tool(
+  "update_department",
+  "Update an existing department",
+  {
+    id: z.number().describe("Department ID"),
+    department: z.string().describe("JSON string of fields to update"),
   },
+  handleTool(({ id, department }) => {
+    const deptData = parseJsonObject(department, "department");
+    return client.updateDepartment(id, deptData);
+  }),
+);
+
+server.tool(
+  "delete_department",
+  "Delete a department by ID",
+  { id: z.number().describe("Department ID") },
+  handleTool(({ id }) => client.deleteDepartment(id)),
 );
 
 // ═══════════════════════════════════════════════════════════════
@@ -717,14 +613,7 @@ server.tool(
   "get_account_info",
   "Get current account information",
   {},
-  async () => {
-    try {
-      const data = await client.getAccountInfo();
-      return result(data);
-    } catch (err) {
-      return errorResult(err);
-    }
-  },
+  handleTool(() => client.getAccountInfo()),
 );
 
 // ── Start ────────────────────────────────────────────────────

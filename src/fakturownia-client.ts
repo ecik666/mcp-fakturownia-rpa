@@ -5,15 +5,27 @@
 export interface FakturowniaConfig {
   apiToken: string;
   domain: string; // e.g. "mycompany" → mycompany.fakturownia.pl
+  /** Request timeout in milliseconds (default: 30_000). */
+  timeoutMs?: number;
+  /** Max retry attempts for 429 / 5xx errors (default: 3). */
+  maxRetries?: number;
 }
+
+const DEFAULT_TIMEOUT_MS = 30_000;
+const DEFAULT_MAX_RETRIES = 3;
+const RETRY_BASE_DELAY_MS = 1_000;
 
 export class FakturowniaClient {
   private baseUrl: string;
   private apiToken: string;
+  private timeoutMs: number;
+  private maxRetries: number;
 
   constructor(config: FakturowniaConfig) {
     this.apiToken = config.apiToken;
     this.baseUrl = `https://${config.domain}.fakturownia.pl`;
+    this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.maxRetries = config.maxRetries ?? DEFAULT_MAX_RETRIES;
   }
 
   private async request<T = unknown>(
@@ -35,35 +47,94 @@ export class FakturowniaClient {
       }
     }
 
+    const hasBody =
+      body && (method === "POST" || method === "PUT" || method === "PATCH");
+
     const headers: Record<string, string> = {
       Accept: "application/json",
-      "Content-Type": "application/json",
     };
+
+    // Only set Content-Type when we actually send a body (#15)
+    if (hasBody) {
+      headers["Content-Type"] = "application/json";
+    }
 
     const fetchOptions: RequestInit = { method, headers };
 
-    if (body && (method === "POST" || method === "PUT" || method === "PATCH")) {
+    if (hasBody) {
       fetchOptions.body = JSON.stringify({
         api_token: this.apiToken,
         ...body,
       });
     }
 
-    const response = await fetch(url.toString(), fetchOptions);
+    // Retry loop with exponential backoff for 429 / 5xx (#12)
+    let lastError: Error | undefined;
+    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+      if (attempt > 0) {
+        const delay =
+          RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1) +
+          Math.random() * 500;
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(
-        `Fakturownia API error ${response.status}: ${errorText}`,
-      );
+      // Abort controller for request timeout (#13)
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+
+      try {
+        const response = await fetch(url.toString(), {
+          ...fetchOptions,
+          signal: controller.signal,
+        });
+
+        clearTimeout(timer);
+
+        // Retry on 429 (rate limit) or 5xx (server error)
+        if (
+          (response.status === 429 || response.status >= 500) &&
+          attempt < this.maxRetries
+        ) {
+          const errorText = await response.text();
+          lastError = new Error(
+            `Fakturownia API error ${response.status}: ${errorText}`,
+          );
+          continue;
+        }
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(
+            `Fakturownia API error ${response.status}: ${errorText}`,
+          );
+        }
+
+        const contentType = response.headers.get("content-type") || "";
+        if (contentType.includes("application/json")) {
+          return (await response.json()) as T;
+        }
+
+        return (await response.text()) as unknown as T;
+      } catch (err) {
+        clearTimeout(timer);
+
+        // Convert AbortError to a friendlier message
+        if (err instanceof DOMException && err.name === "AbortError") {
+          lastError = new Error(
+            `Fakturownia API request timed out after ${this.timeoutMs}ms: ${method} ${path}`,
+          );
+          // Timeout = retry
+          if (attempt < this.maxRetries) continue;
+          throw lastError;
+        }
+
+        // Non-retryable errors (network, parse, etc.) — throw immediately
+        throw err;
+      }
     }
 
-    const contentType = response.headers.get("content-type") || "";
-    if (contentType.includes("application/json")) {
-      return (await response.json()) as T;
-    }
-
-    return (await response.text()) as unknown as T;
+    // All retries exhausted
+    throw lastError ?? new Error("Fakturownia API request failed after retries");
   }
 
   // ── Invoices ────────────────────────────────────────────────
@@ -94,22 +165,27 @@ export class FakturowniaClient {
   }
 
   async sendInvoiceByEmail(id: number) {
-    return this.request(
-      "POST",
-      `/invoices/${id}/send_by_email.json`,
-      {},
-      {},
-    );
+    // POST with empty body — api_token will be injected automatically (#5)
+    return this.request("POST", `/invoices/${id}/send_by_email.json`, {});
   }
 
   async changeInvoiceStatus(id: number, status: string) {
-    return this.request("GET", `/invoices/${id}/change_status.json`, undefined, {
-      status,
-    });
+    return this.request(
+      "GET",
+      `/invoices/${id}/change_status.json`,
+      undefined,
+      { status },
+    );
   }
 
-  async getInvoicePdfUrl(id: number): Promise<string> {
-    return `${this.baseUrl}/invoices/${id}.pdf?api_token=${this.apiToken}`;
+  getInvoicePdfUrl(id: number): { pdf_url_internal: string; message: string } {
+    // Synchronous — no async needed (#11). Does not expose API token.
+    return {
+      pdf_url_internal: `${this.baseUrl}/invoices/${id}.pdf`,
+      message:
+        "PDF is available at the URL above (requires authentication). " +
+        "Use the Fakturownia web interface to download or share the PDF securely.",
+    };
   }
 
   async sendInvoiceToKsef(id: number) {
@@ -172,7 +248,8 @@ export class FakturowniaClient {
   }
 
   async getPayment(id: number) {
-    return this.request("GET", `/banking/payment/${id}.json`);
+    // Fixed: was "/banking/payment/" (singular) — matches other payment endpoints (#4)
+    return this.request("GET", `/banking/payments/${id}.json`);
   }
 
   async createPayment(payment: Record<string, unknown>) {
